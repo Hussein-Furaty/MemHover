@@ -203,9 +203,9 @@ unsafe extern "system" fn tooltip_wnd_proc(
             
             let mut y_offset = 10;
             
-            // Render pre-formatted text lines. 
-            // This approach strictly avoids string allocation/UTF-16 conversion overhead during the repaint pipeline.
-            for line in TOOLTIP_LINES.iter_mut() {
+            // Render pre-formatted text lines.
+            // Raw pointer access is used here to comply with Rust 2024 strict aliasing rules for mutable statics.
+            for line in (*std::ptr::addr_of_mut!(TOOLTIP_LINES)).iter_mut() {
                 let mut render_rect = RECT { 
                     left: 12, 
                     top: y_offset, 
@@ -277,15 +277,74 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     let _ = DestroyMenu(menu);
 }
 
+/// Determines whether the cursor is currently positioned over the Windows Taskbar
+/// or the System Tray notification area.
+///
+/// Resolution strategy: Traverses the complete parent window chain from the window
+/// directly under the cursor upward, checking each ancestor's class name against
+/// well-known taskbar identifiers. This approach is robust across Windows 10 and 11,
+/// where the internal taskbar window hierarchy may differ significantly.
+///
+/// Recognized taskbar class names:
+/// - `Shell_TrayWnd`              → Primary taskbar (Win10/11)
+/// - `Shell_SecondaryTrayWnd`     → Secondary monitor taskbar
+/// - `NotifyIconOverflowWindow`   → System tray overflow (hidden icons)
+unsafe fn is_cursor_over_taskbar_or_tray(pt: POINT) -> bool {
+    let mut hwnd = WindowFromPoint(pt);
+    if hwnd.is_invalid() {
+        return false;
+    }
+
+    // Walk the complete ancestor chain rather than jumping directly to the root,
+    // as Windows 11 introduced a multi-level taskbar window hierarchy that breaks
+    // the simpler GA_ROOT approach used in prior Windows versions.
+    loop {
+        let mut class_buf = [0u16; 256];
+        let char_count = GetClassNameW(hwnd, &mut class_buf);
+
+        if char_count > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..char_count as usize]);
+            match class_name.as_str() {
+                "Shell_TrayWnd"
+                | "Shell_SecondaryTrayWnd"
+                | "NotifyIconOverflowWindow" => return true,
+                _ => {}
+            }
+        }
+
+        // Advance to the next ancestor; terminate if the chain is exhausted
+        match GetParent(hwnd) {
+            Ok(parent) if !parent.is_invalid() => hwnd = parent,
+            _ => break,
+        }
+    }
+
+    false
+}
+
+
+
 /// Core routine invoked periodically to resolve the UI element under the cursor,
 /// retrieve associated process memory metrics, and update the UI overlay accordingly.
+/// 
+/// The routine performs an early-exit check to ensure metrics are only surfaced
+/// when the cursor is positioned over the Windows Taskbar or System Tray — not
+/// over arbitrary application windows.
 unsafe fn poll_cursor_and_update_metrics() {
     let mut pt = POINT::default();
     if GetCursorPos(&mut pt).is_err() {
         return;
     }
 
-    let automation = match &UI_AUTOMATION_INSTANCE {
+    // Early-exit guard: Suppress tooltip rendering when the cursor is not
+    // positioned over the taskbar or system tray notification area.
+    if !is_cursor_over_taskbar_or_tray(pt) {
+        hide_tooltip_overlay();
+        return;
+    }
+
+    // Access the cached COM instance via a raw pointer to satisfy Rust 2024 aliasing rules.
+    let automation = match &*std::ptr::addr_of!(UI_AUTOMATION_INSTANCE) {
         Some(a) => a,
         None => return, // Fail gracefully if the COM infrastructure is unavailable
     };
@@ -338,9 +397,11 @@ unsafe fn poll_cursor_and_update_metrics() {
         let line1 = format!("App: {}", name);
         let line2 = format!("RAM: {:.1} MB | Priv: {:.1} MB", working_set_mb, private_mb);
         
-        TOOLTIP_LINES.clear();
-        TOOLTIP_LINES.push(encode_wide_with_null(&line1));
-        TOOLTIP_LINES.push(encode_wide_with_null(&line2));
+        // Mutate the static buffer through a raw pointer to comply with Rust 2024 strict aliasing rules.
+        let lines = &mut *std::ptr::addr_of_mut!(TOOLTIP_LINES);
+        lines.clear();
+        lines.push(encode_wide_with_null(&line1));
+        lines.push(encode_wide_with_null(&line2));
         LAST_HOVERED_PID = target_pid;
 
         // Reposition the overlay relative to the cursor and force a repaint invalidation
