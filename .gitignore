@@ -4,3 +4,6 @@
 
 .vscode/
 .idea/
+
+# Compiled installer output — belongs in GitHub Releases, not source control
+/dist/
