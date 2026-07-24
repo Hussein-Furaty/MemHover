@@ -5,7 +5,7 @@ edition = "2021"
 description ="A tool that shows an app's memory usage when you hover over its icon in the taskbar"
 
 [[bin]]
-name = "app-memory-tooltip"
+name = "memhover"
 path = "src/main.rs"
 
 [profile.release]
@@ -28,6 +28,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_UI_Accessibility", # مضافة خصيصاً لدعم UI Automation
     "Win32_System_Com",
+    "Win32_Graphics_Dwm",
 ] }
 
 [build-dependencies]
